@@ -9,10 +9,6 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 
-LINK_NEW = "https://gguapromo.com/l/694bf8aa934079ff9d09ee13"
-LINK_HAS_ACCOUNT_1 = "https://click.cpahome-track.com/sK2ffaE0"
-LINK_HAS_ACCOUNT_2 = "https://click.trafficeratrack.com/U7PXF5Wh"
-
 WELCOME_MESSAGE = """👋 Вітаємо! Дякуємо за інтерес до нашої команди!
 
 Якщо ви хочете почати співпрацю, будь ласка, уважно ознайомтесь із наступними умовами:
@@ -52,18 +48,27 @@ SYSTEM_PROMPT = """Ти менеджер по набору команди. Тв�
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 conversation_history = {}
+last_bot_message = {}
+user_replied = {}
+reminder_sent = {}
 
-# Зберігаємо час останнього повідомлення і чи вже надіслали нагадування
-last_bot_message = {}   # user_id -> datetime коли бот написав
-user_replied = {}        # user_id -> True якщо людина відповіла
-reminder_sent = {}       # user_id -> True якщо нагадування вже надіслано
+
+async def notify_admin(context, text):
+    """Надсилає повідомлення адміну"""
+    if ADMIN_TELEGRAM_ID:
+        try:
+            await context.bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=text)
+        except Exception as e:
+            print(f"Помилка сповіщення адміна: {e}")
 
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.chat_join_request.from_user
     user_id = user.id
+    name = f"{user.first_name} {user.last_name or ''}".strip()
+    username = f"@{user.username}" if user.username else "немає username"
 
-    print(f"Нова заявка від {user.first_name} (ID: {user_id})")
+    print(f"Нова заявка від {name} (ID: {user_id})")
 
     conversation_history[user_id] = []
     user_replied[user_id] = False
@@ -72,24 +77,29 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         await context.bot.send_message(chat_id=user_id, text=WELCOME_MESSAGE)
         last_bot_message[user_id] = datetime.now()
-        print(f"Привітання надіслано {user_id}")
 
-        if ADMIN_TELEGRAM_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_TELEGRAM_ID,
-                text=f"📥 Нова заявка!\n\n"
-                     f"👤 {user.first_name} {user.last_name or ''}\n"
-                     f"🔗 @{user.username or 'немає'}\n"
-                     f"🆔 ID: {user_id}"
-            )
+        await notify_admin(context,
+            f"📥 НОВА ЗАЯВКА\n"
+            f"👤 {name}\n"
+            f"🔗 {username}\n"
+            f"🆔 ID: {user_id}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🤖 Бот надіслав привітання"
+        )
     except Exception as e:
         print(f"Не вдалось написати {user_id}: {e}")
+        await notify_admin(context,
+            f"⚠️ Нова заявка від {name} ({username})\n"
+            f"Але не вдалось написати — людина не писала боту першою"
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    user = update.effective_user
+    name = f"{user.first_name} {user.last_name or ''}".strip()
+    username = f"@{user.username}" if user.username else "немає username"
 
-    # Відмічаємо що людина відповіла
     user_replied[user_id] = True
     reminder_sent[user_id] = False
     last_bot_message.pop(user_id, None)
@@ -101,22 +111,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Вашу заявку передано адміністратору на перевірку.\n"
             "Очікуйте підтвердження. Зазвичай це займає до 24 годин. ⏳"
         )
+        # Сповіщаємо адміна
+        await notify_admin(context,
+            f"📸 СКРІНШОТ від:\n"
+            f"👤 {name}\n"
+            f"🔗 {username}\n"
+            f"🆔 ID: {user_id}"
+        )
         if ADMIN_TELEGRAM_ID:
-            user = update.effective_user
-            await context.bot.send_message(
-                chat_id=ADMIN_TELEGRAM_ID,
-                text=f"📸 Скріншот від:\n👤 {user.first_name} @{user.username or 'немає'}\n🆔 {user_id}"
-            )
-            await context.bot.forward_message(
-                chat_id=ADMIN_TELEGRAM_ID,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.message.message_id
-            )
+            try:
+                await context.bot.forward_message(
+                    chat_id=ADMIN_TELEGRAM_ID,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id
+                )
+            except Exception as e:
+                print(f"Помилка пересилання фото: {e}")
         return
 
     user_text = update.message.text
     if not user_text:
         return
+
+    # Пересилаємо повідомлення адміну
+    await notify_admin(context,
+        f"💬 Повідомлення від:\n"
+        f"👤 {name} ({username})\n"
+        f"🆔 ID: {user_id}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👤: {user_text}"
+    )
 
     if user_id not in conversation_history:
         conversation_history[user_id] = []
@@ -140,7 +164,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(reply)
 
-        # Оновлюємо час останнього повідомлення бота
+        # Пересилаємо відповідь бота адміну
+        await notify_admin(context,
+            f"🤖 Відповідь бота:\n{reply}"
+        )
+
         last_bot_message[user_id] = datetime.now()
         user_replied[user_id] = False
 
@@ -159,13 +187,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_reminders(app):
-    """Перевіряємо кожні 10 хвилин чи треба надіслати нагадування"""
     while True:
-        await asyncio.sleep(600)  # кожні 10 хвилин
+        await asyncio.sleep(600)
         now = datetime.now()
 
         for user_id, sent_time in list(last_bot_message.items()):
-            # Якщо пройшло 2 години, людина не відповіла і нагадування ще не надсилали
             if (now - sent_time >= timedelta(hours=2)
                     and not user_replied.get(user_id, True)
                     and not reminder_sent.get(user_id, True)):
@@ -175,7 +201,7 @@ async def check_reminders(app):
                     last_bot_message.pop(user_id, None)
                     print(f"Нагадування надіслано {user_id}")
                 except Exception as e:
-                    print(f"Не вдалось надіслати нагадування {user_id}: {e}")
+                    print(f"Помилка нагадування {user_id}: {e}")
 
 
 def main():
@@ -185,9 +211,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Запускаємо перевірку нагадувань
-    loop = asyncio.get_event_loop()
 
     async def post_init(application):
         asyncio.create_task(check_reminders(application))
